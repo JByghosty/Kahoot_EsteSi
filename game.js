@@ -236,7 +236,8 @@ function handlePlayerMsg(msg){
             // Feedback is already shown by playerAns
             break;
         case 'show-results':
-            showPlayerResult();
+            // El jugador se queda en la pantalla de la pregunta viendo 
+            // el feedback (Correcto/Incorrecto) hasta la próxima pregunta
             break;
         case 'next-question':
             S.answered = false;
@@ -442,12 +443,11 @@ function playerAns(qi,oi,btn){
     if(ok){
         fb.innerHTML=`<div class="feedback-content"><div class="feedback-icon">✅</div>
         <div class="feedback-text" style="color:var(--success)">¡Correcto!</div>
-        <div style="color:var(--neon-green);font-family:var(--font-display);font-size:1.2rem;margin-top:8px">Esperando puntuación...</div></div>`;
-        // Update score when answer-result arrives
+        <div style="color:var(--text2);font-size:.9rem;margin-top:12px">Esperando a que el profesor avance...</div></div>`;
     } else {
         fb.innerHTML=`<div class="feedback-content"><div class="feedback-icon">❌</div>
         <div class="feedback-text" style="color:var(--danger)">Incorrecto</div>
-        <div style="color:var(--text2);margin-top:8px">Respuesta: ${q.o[q.c]}</div></div>`;
+        <div style="color:var(--text2);font-size:.95rem;margin-top:12px">Esperando a que el profesor avance...</div></div>`;
     }
 }
 
@@ -458,7 +458,8 @@ function showTimeUpFeedback(){
     }
     const fb=document.getElementById('pq-feedback'); fb.classList.remove('hidden');
     fb.innerHTML=`<div class="feedback-content"><div class="feedback-icon">⏰</div>
-    <div class="feedback-text" style="color:var(--neon-yellow)">¡Tiempo agotado!</div></div>`;
+    <div class="feedback-text" style="color:var(--neon-yellow)">¡Tiempo agotado!</div>
+    <div style="color:var(--text3);font-size:.85rem;margin-top:8px">Esperando la siguiente pregunta...</div></div>`;
 }
 
 // ═══════════ RESULTADOS — PROFESOR ═══════════

@@ -16,6 +16,15 @@ const PTS_BASE = 1000;
 const PTS_SPEED = 500;
 const PTS_STREAK = 200;
 const PEER_PREFIX = 'cquiz-';
+const PEER_CONFIG = {
+    config: {
+        iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' }
+        ]
+    }
+};
 
 // ─── PREGUNTAS basadas en la charla "Internet Seguro" ───
 const QUESTIONS = [
@@ -84,7 +93,7 @@ function createRoom(){
 
     // Create PeerJS host
     const peerId = PEER_PREFIX + code;
-    peer = new Peer(peerId);
+    peer = new Peer(peerId, PEER_CONFIG);
 
     peer.on('open', ()=>{
         document.getElementById('teacher-room-code').textContent = code;
@@ -170,7 +179,7 @@ function joinRoomStep1(){
     S.roomCode = code; S.role = 'player'; S.playerId = 'p_' + genId();
 
     // Create player peer and connect to teacher
-    peer = new Peer();
+    peer = new Peer(PEER_CONFIG);
     peer.on('open', ()=>{
         const hostId = PEER_PREFIX + code;
         hostConn = peer.connect(hostId, {reliable:true});
@@ -199,8 +208,10 @@ function joinRoomStep1(){
         setTimeout(()=>{
             if(!hostConn || !hostConn.open){
                 err.textContent='Sala no encontrada o profesor desconectado';
+                // Clean up so they can try again
+                if(peer) peer.destroy();
             }
-        }, 5000);
+        }, 12000);
     });
 
     peer.on('error', err2 => {

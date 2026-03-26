@@ -17,11 +17,15 @@ const PTS_SPEED = 500;
 const PTS_STREAK = 200;
 const PEER_PREFIX = 'cquiz-';
 const PEER_CONFIG = {
+    // Configuración robusta para atravesar cualquier red (WiFi estricto o Datos Móviles 4G/5G)
     config: {
         iceServers: [
+            // STUN: ayudan a las computadoras a descubrir su propia IP pública
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
-            // TURN servers para atravesar redes estrictas (como datos móviles 4G/5G)
+            { urls: 'stun:stun.cloudflare.com:3478' },
+            
+            // TURN: El "puente" intermedio obligatorio cuando las redes bloquean conexiones directas (Symmetric NAT)
             { urls: 'stun:openrelay.metered.ca:80' },
             { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
             { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },

@@ -1,6 +1,7 @@
 /* ═══════════════════════════════════════════════════════════
    Internet Seguro — CyberQuiz Game Engine
-   Multiplayer via BroadcastChannel + localStorage
+   Cross-device multiplayer via PeerJS (WebRTC)
+   Teacher = host peer, Players = client peers
    ═══════════════════════════════════════════════════════════ */
 
 const AVATARS = ['🤖','👾','🦊','🐱‍💻','🧑‍💻','👤','🦸','🧙','🎯','🛡️','🔮','🕵️'];
@@ -14,6 +15,7 @@ const TIME_PER_Q = 20;
 const PTS_BASE = 1000;
 const PTS_SPEED = 500;
 const PTS_STREAK = 200;
+const PEER_PREFIX = 'cquiz-';
 
 // ─── PREGUNTAS basadas en la charla "Internet Seguro" ───
 const QUESTIONS = [
@@ -40,8 +42,14 @@ let S = {
     playerAvatar:null, playerTeam:null, currentQ:0,
     score:0, streak:0, answered:false, timerIv:null, timeLeft:TIME_PER_Q
 };
-let channel = null;
-let lobbyPoll = null, teacherPoll = null, playerWaitPoll = null;
+
+// PeerJS
+let peer = null;
+let conns = [];        // Teacher: array of DataConnection to players
+let hostConn = null;   // Player: DataConnection to teacher
+
+// Room state (teacher holds authoritative copy, players get synced copy)
+let room = null;
 
 // ─── UTILIDADES ───
 const genId = () => Math.random().toString(36).substr(2,9);
@@ -50,98 +58,209 @@ function genCode(){
     for(let i=0;i<6;i++) r+=c[Math.floor(Math.random()*c.length)];
     return r;
 }
-const getRoom = code => { try{return JSON.parse(localStorage.getItem('room_'+code))}catch{return null} };
-const saveRoom = room => localStorage.setItem('room_'+room.code, JSON.stringify(room));
-const rmRoom = code => localStorage.removeItem('room_'+code);
-
 function showScreen(id){
     document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
     document.getElementById(id)?.classList.add('active');
 }
-
 function shuffle(a){
     for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}
     return a;
 }
 
-// ─── BROADCASTCHANNEL ───
-function initChannel(code){
-    if(channel) channel.close();
-    channel = new BroadcastChannel('cq_'+code);
-    channel.onmessage = e => handleMsg(e.data);
-}
-function bcast(type, data={}){
-    if(channel) channel.postMessage({type,...data,sid:S.playerId});
+// ═══════════ TEACHER: BROADCAST TO ALL PLAYERS ═══════════
+function broadcast(msg){
+    conns.forEach(c=>{ try{c.send(msg)}catch{} });
 }
 
-function handleMsg(m){
-    if(m.sid===S.playerId) return;
-    switch(m.type){
-        case 'player-joined': case 'player-update':
-            if(S.role==='teacher') refreshTeacherLobby();
-            if(S.role==='player') refreshPlayerLobby();
-            break;
-        case 'game-start': startCountdown(); break;
-        case 'show-question':
-            if(S.role==='player') showPlayerQ(m.qi); break;
-        case 'player-answered':
-            if(S.role==='teacher') refreshTQStats(); break;
-        case 'show-results':
-            if(S.role==='teacher') showTeacherResults();
-            if(S.role==='player') showPlayerResult();
-            break;
-        case 'next-question':
-            if(S.role==='player'){S.answered=false; showPlayerQ(m.qi);} break;
-        case 'game-over': showFinal(); break;
-        case 'time-up':
-            if(S.role==='player' && !S.answered){
-                S.answered=true; clearInterval(S.timerIv); showTimeUp();
-            } break;
-    }
-}
-
-// ═══════════ CREAR SALA ═══════════
+// ═══════════ CREAR SALA (TEACHER) ═══════════
 function createRoom(){
     const code = genCode();
     S.role='teacher'; S.roomCode=code; S.playerId='t_'+genId();
-    const room = {
+
+    room = {
         code, players:[], started:false, currentQ:0, answers:{},
         qOrder: shuffle([...Array(QUESTIONS.length).keys()])
     };
-    saveRoom(room);
-    initChannel(code);
-    document.getElementById('teacher-room-code').textContent = code;
-    refreshTeacherLobby();
-    showScreen('screen-teacher-lobby');
-    startLobbyPoll();
+
+    // Create PeerJS host
+    const peerId = PEER_PREFIX + code;
+    peer = new Peer(peerId);
+
+    peer.on('open', ()=>{
+        document.getElementById('teacher-room-code').textContent = code;
+        refreshTeacherLobby();
+        showScreen('screen-teacher-lobby');
+    });
+
+    peer.on('connection', conn => {
+        conn.on('open', ()=>{
+            conns.push(conn);
+            // Send current room state to new connection
+            conn.send({type:'room-sync', room});
+        });
+        conn.on('data', data => handleTeacherMsg(data, conn));
+        conn.on('close', ()=>{
+            conns = conns.filter(c => c !== conn);
+        });
+    });
+
+    peer.on('error', err => {
+        console.error('Peer error:', err);
+        if(err.type === 'unavailable-id'){
+            document.getElementById('start-error').textContent = 'Código ocupado, intenta de nuevo';
+            peer.destroy();
+            createRoom(); // retry with new code
+        }
+    });
 }
 
-// Abre una nueva pestaña del mismo archivo para un jugador (garantiza mismo origin)
-function openPlayerTab(){
-    const url = location.href.split('#')[0] + '#room=' + S.roomCode;
-    window.open(url, '_blank');
+// Teacher handles messages from players
+function handleTeacherMsg(msg, conn){
+    switch(msg.type){
+        case 'join':
+            room.players.push(msg.player);
+            refreshTeacherLobby();
+            // Broadcast updated room to all
+            broadcast({type:'room-sync', room});
+            break;
+        case 'answer':
+            if(!room.answers[msg.qi]) room.answers[msg.qi] = [];
+            // Avoid duplicate answers
+            if(room.answers[msg.qi].find(a=>a.pid===msg.pid)) break;
+            // Calculate score
+            const q = QUESTIONS[room.qOrder[msg.qi]];
+            const ok = msg.oi === q.c;
+            let pts = 0;
+            const pl = room.players.find(p=>p.id===msg.pid);
+            if(ok && pl){
+                const speedRatio = Math.max(0, 1 - msg.time/TIME_PER_Q);
+                pts = PTS_BASE + Math.round(PTS_SPEED * speedRatio);
+                pl.streak = (pl.streak||0) + 1;
+                if(pl.streak >= 3) pts += PTS_STREAK;
+                pl.score += pts;
+            } else if(pl){
+                pl.streak = 0;
+            }
+            room.answers[msg.qi].push({pid:msg.pid, oi:msg.oi, time:msg.time, ok, pts});
+            // Send result to the answering player
+            conn.send({type:'answer-result', ok, pts, score:pl?pl.score:0, streak:pl?pl.streak:0});
+            // Update teacher display
+            refreshTQStats();
+            // Broadcast updated room
+            broadcast({type:'room-sync', room});
+            // Check if all answered
+            if(room.answers[msg.qi].length >= room.players.length && S.timeLeft > 0){
+                clearInterval(S.timerIv);
+                setTimeout(()=>{
+                    broadcast({type:'show-results'});
+                    showTeacherResults();
+                }, 500);
+            }
+            break;
+    }
 }
 
-// ═══════════ UNIRSE A SALA ═══════════
+// ═══════════ UNIRSE A SALA (PLAYER) ═══════════
 function joinRoomStep1(){
     const code = document.getElementById('input-room-code').value.trim().toUpperCase();
     const err = document.getElementById('join-error');
     if(!code||code.length<4){err.textContent='Ingresa un código válido';return}
-    const room = getRoom(code);
-    if(!room){err.textContent='Sala no encontrada';return}
-    if(room.started){err.textContent='El juego ya inició';return}
-    err.textContent='';
-    S.roomCode=code; S.role='player'; S.playerId='p_'+genId();
-    initChannel(code);
-    buildSetup(room);
-    showScreen('screen-player-setup');
+    err.textContent='Conectando...';
+
+    S.roomCode = code; S.role = 'player'; S.playerId = 'p_' + genId();
+
+    // Create player peer and connect to teacher
+    peer = new Peer();
+    peer.on('open', ()=>{
+        const hostId = PEER_PREFIX + code;
+        hostConn = peer.connect(hostId, {reliable:true});
+
+        hostConn.on('open', ()=>{
+            err.textContent='';
+            // We'll wait for room-sync to build the setup
+        });
+
+        hostConn.on('data', data => handlePlayerMsg(data));
+
+        hostConn.on('close', ()=>{
+            // Host disconnected
+            if(S.role === 'player'){
+                alert('El profesor cerró la sala');
+                backToHome();
+            }
+        });
+
+        hostConn.on('error', e => {
+            err.textContent='No se pudo conectar a la sala';
+            console.error('Connection error:', e);
+        });
+
+        // Timeout if no connection
+        setTimeout(()=>{
+            if(!hostConn || !hostConn.open){
+                err.textContent='Sala no encontrada o profesor desconectado';
+            }
+        }, 5000);
+    });
+
+    peer.on('error', err2 => {
+        console.error('Peer error:', err2);
+        err.textContent='Error de conexión. Intenta de nuevo.';
+    });
 }
 
-function buildSetup(room){
+// Player handles messages from teacher
+function handlePlayerMsg(msg){
+    switch(msg.type){
+        case 'room-sync':
+            room = msg.room;
+            // If we haven't joined yet (first sync), show setup
+            if(!S.playerName && !room.started){
+                buildSetup(room);
+                showScreen('screen-player-setup');
+            }
+            // If we're in lobby, update info
+            if(S.playerName && !room.started){
+                refreshPlayerLobby();
+            }
+            break;
+        case 'game-start':
+            startCountdown();
+            break;
+        case 'show-question':
+            showPlayerQ(msg.qi);
+            break;
+        case 'answer-result':
+            S.score = msg.score;
+            S.streak = msg.streak;
+            // Feedback is already shown by playerAns
+            break;
+        case 'show-results':
+            showPlayerResult();
+            break;
+        case 'next-question':
+            S.answered = false;
+            showPlayerQ(msg.qi);
+            break;
+        case 'game-over':
+            room = msg.room; // get final scores
+            showFinal();
+            break;
+        case 'time-up':
+            if(!S.answered){
+                S.answered = true;
+                clearInterval(S.timerIv);
+                showTimeUpFeedback();
+            }
+            break;
+    }
+}
+
+function buildSetup(rm){
     document.getElementById('avatar-grid').innerHTML = AVATARS.map((a,i)=>
         `<div class="avatar-item" data-i="${i}" onclick="selAvatar(this)">${a}</div>`).join('');
-    const t1=room.players.filter(p=>p.team==='cyber').length;
-    const t2=room.players.filter(p=>p.team==='shield').length;
+    const t1=rm.players.filter(p=>p.team==='cyber').length;
+    const t2=rm.players.filter(p=>p.team==='shield').length;
     const diff=Math.abs(t1-t2);
     document.getElementById('team-select').innerHTML = TEAMS.map((t,i)=>{
         const cnt=i===0?t1:t2; const dis=diff>=1&&(i===0?t1>t2:t2>t1);
@@ -160,6 +279,7 @@ function selTeam(el){
     document.querySelectorAll('.team-card').forEach(c=>c.classList.remove('selected'));
     el.classList.add('selected'); S.playerTeam=el.dataset.team;
 }
+
 function joinRoomFinal(){
     const name=document.getElementById('input-player-name').value.trim();
     const err=document.getElementById('setup-error');
@@ -167,31 +287,20 @@ function joinRoomFinal(){
     if(!S.playerAvatar){err.textContent='Elige un avatar';return}
     if(!S.playerTeam){err.textContent='Elige un equipo';return}
     err.textContent=''; S.playerName=name;
-    const room=getRoom(S.roomCode);
-    if(!room){err.textContent='Sala no encontrada';return}
-    if(room.started){err.textContent='El juego ya comenzó';return}
-    room.players.push({id:S.playerId,name:S.playerName,avatar:S.playerAvatar,team:S.playerTeam,score:0,streak:0});
-    saveRoom(room); bcast('player-joined');
-    document.getElementById('player-room-code').textContent=S.roomCode;
-    refreshPlayerLobby();
+
+    // Send join message to teacher
+    hostConn.send({
+        type:'join',
+        player:{id:S.playerId, name:S.playerName, avatar:S.playerAvatar, team:S.playerTeam, score:0, streak:0}
+    });
+
+    document.getElementById('player-room-code').textContent = S.roomCode;
     showScreen('screen-player-lobby');
-    startLobbyPoll();
 }
 
 // ═══════════ LOBBY ═══════════
-function startLobbyPoll(){
-    if(lobbyPoll)clearInterval(lobbyPoll);
-    lobbyPoll=setInterval(()=>{
-        const room=getRoom(S.roomCode); if(!room)return;
-        if(S.role==='teacher') refreshTeacherLobby();
-        if(S.role==='player'){
-            refreshPlayerLobby();
-            if(room.started){clearInterval(lobbyPoll);startCountdown()}
-        }
-    },800);
-}
 function refreshTeacherLobby(){
-    const room=getRoom(S.roomCode); if(!room)return;
+    if(!room) return;
     document.getElementById('lobby-teams').innerHTML = TEAMS.map(t=>{
         const m=room.players.filter(p=>p.team===t.id);
         return `<div class="lobby-team-card"><h3><span style="color:${t.color}">${t.emoji} ${t.name}</span> <span style="color:var(--text3);font-weight:400;font-size:.85rem">(${m.length})</span></h3>
@@ -203,35 +312,48 @@ function refreshTeacherLobby(){
     if(room.players.length<2){btn.disabled=true;err.textContent='Se necesitan al menos 2 jugadores'}
     else{btn.disabled=false;err.textContent=''}
 }
+
 function refreshPlayerLobby(){
-    const room=getRoom(S.roomCode); if(!room)return;
+    if(!room) return;
     const t1=room.players.filter(p=>p.team==='cyber').length;
     const t2=room.players.filter(p=>p.team==='shield').length;
     document.getElementById('player-lobby-info').innerHTML=`⚡ Cyber: ${t1} · 🛡️ Shield: ${t2}`;
 }
 
+// ═══════════ OPEN PLAYER TAB ═══════════
+function openPlayerTab(){
+    const url = location.href.split('#')[0] + '#room=' + S.roomCode;
+    window.open(url, '_blank');
+}
+
 // ═══════════ INICIAR JUEGO ═══════════
 function startGame(){
-    const room=getRoom(S.roomCode);
-    if(!room||room.players.length<2)return;
-    room.started=true; room.currentQ=0; saveRoom(room);
-    bcast('game-start'); clearInterval(lobbyPoll); startCountdown();
+    if(!room || room.players.length<2) return;
+    room.started = true;
+    broadcast({type:'game-start'});
+    startCountdown();
 }
+
 function startCountdown(){
     showScreen('screen-countdown');
     let c=3; const el=document.getElementById('countdown-number'); el.textContent=c;
     const iv=setInterval(()=>{
         c--; if(c>0){el.textContent=c}
         else{clearInterval(iv);
-            if(S.role==='teacher'){showTeacherQ(0);bcast('show-question',{qi:0})}
-            else showPlayerQ(0);
+            if(S.role==='teacher'){
+                S.currentQ = 0;
+                showTeacherQ(0);
+                broadcast({type:'show-question', qi:0});
+            } else {
+                showPlayerQ(0);
+            }
         }
     },1000);
 }
 
 // ═══════════ PREGUNTA — PROFESOR ═══════════
 function showTeacherQ(qi){
-    const room=getRoom(S.roomCode); if(!room)return;
+    if(!room) return;
     const q=QUESTIONS[room.qOrder[qi]]; S.currentQ=qi;
     document.getElementById('tq-progress').textContent=`Pregunta ${qi+1}/${room.qOrder.length}`;
     document.getElementById('tq-question').textContent=q.q;
@@ -239,37 +361,36 @@ function showTeacherQ(qi){
     document.getElementById('tq-answered').textContent='0';
     document.getElementById('tq-options').innerHTML=q.o.map((o,i)=>
         `<div class="opt-display-item"><div class="opt-shape" style="background:${OPT_COLORS[i]}">${OPT_SHAPES[i]}</div><span>${o}</span></div>`).join('');
-    updateTeamScores(room);
+    updateTeamScores();
     showScreen('screen-teacher-question');
     S.timeLeft=TIME_PER_Q;
     document.getElementById('tq-timer').textContent=`⏱ ${S.timeLeft}s`;
     clearInterval(S.timerIv);
+    if(!room.answers[qi]) room.answers[qi]=[];
+
     S.timerIv=setInterval(()=>{
         S.timeLeft--;
         document.getElementById('tq-timer').textContent=`⏱ ${S.timeLeft}s`;
         if(S.timeLeft<=0){
-            clearInterval(S.timerIv); bcast('time-up');
-            setTimeout(()=>{showTeacherResults();bcast('show-results')},1000);
+            clearInterval(S.timerIv);
+            broadcast({type:'time-up'});
+            setTimeout(()=>{
+                broadcast({type:'show-results'});
+                showTeacherResults();
+            },1000);
         }
     },1000);
-    if(!room.answers[qi])room.answers[qi]=[];
-    saveRoom(room); startTeacherPoll();
 }
-function startTeacherPoll(){
-    if(teacherPoll)clearInterval(teacherPoll);
-    teacherPoll=setInterval(()=>refreshTQStats(),500);
-}
+
 function refreshTQStats(){
-    const room=getRoom(S.roomCode); if(!room)return;
+    if(!room) return;
     const ans=room.answers[S.currentQ]||[];
     document.getElementById('tq-answered').textContent=ans.length;
-    updateTeamScores(room);
-    if(ans.length>=room.players.length && S.timeLeft>0){
-        clearInterval(S.timerIv); clearInterval(teacherPoll);
-        setTimeout(()=>{bcast('show-results');showTeacherResults()},500);
-    }
+    updateTeamScores();
 }
-function updateTeamScores(room){
+
+function updateTeamScores(){
+    if(!room) return;
     let s1=0,s2=0;
     room.players.forEach(p=>{if(p.team==='cyber')s1+=p.score;else s2+=p.score});
     document.getElementById('tq-team1-score').textContent=s1;
@@ -278,7 +399,7 @@ function updateTeamScores(room){
 
 // ═══════════ PREGUNTA — JUGADOR ═══════════
 function showPlayerQ(qi){
-    const room=getRoom(S.roomCode); if(!room)return;
+    if(!room) return;
     const q=QUESTIONS[room.qOrder[qi]]; S.currentQ=qi; S.answered=false;
     document.getElementById('pq-progress').textContent=`${qi+1}/${room.qOrder.length}`;
     document.getElementById('pq-question').textContent=q.q;
@@ -298,39 +419,31 @@ function showPlayerQ(qi){
         const pct=Math.max(0,(1-el/TIME_PER_Q)*100);
         document.getElementById('pq-timer').textContent=S.timeLeft+'s';
         document.getElementById('pq-timer-fill').style.width=pct+'%';
-        if(S.timeLeft<=0){clearInterval(S.timerIv);if(!S.answered){S.answered=true;showTimeUp()}}
+        if(S.timeLeft<=0){clearInterval(S.timerIv);if(!S.answered){S.answered=true;showTimeUpFeedback()}}
     },200);
 }
 
 function playerAns(qi,oi,btn){
-    if(S.answered)return; S.answered=true; clearInterval(S.timerIv);
-    const room=getRoom(S.roomCode); if(!room)return;
-    const q=QUESTIONS[room.qOrder[qi]];
-    const ok=oi===q.c;
-    const used=TIME_PER_Q-S.timeLeft;
-    let pts=0;
-    if(ok){
-        pts=PTS_BASE+Math.round(PTS_SPEED*Math.max(0,1-used/TIME_PER_Q));
-        const pl=room.players.find(p=>p.id===S.playerId);
-        if(pl){pl.streak=(pl.streak||0)+1;if(pl.streak>=3)pts+=PTS_STREAK;pl.score+=pts;S.score=pl.score;S.streak=pl.streak}
-    } else {
-        const pl=room.players.find(p=>p.id===S.playerId);
-        if(pl){pl.streak=0;S.streak=0}
-    }
-    if(!room.answers[qi])room.answers[qi]=[];
-    room.answers[qi].push({pid:S.playerId,oi,time:used,ok,pts});
-    saveRoom(room); bcast('player-answered');
-    // Visual
+    if(S.answered) return; S.answered=true; clearInterval(S.timerIv);
+    const used = TIME_PER_Q - S.timeLeft;
+
+    // Send answer to teacher (teacher calculates score)
+    hostConn.send({type:'answer', qi, oi, time:used, pid:S.playerId});
+
+    // Show visual feedback locally
+    const q = QUESTIONS[room.qOrder[qi]];
+    const ok = oi === q.c;
     document.querySelectorAll('#pq-options .option-btn').forEach((b,i)=>{
         b.classList.add('disabled');
-        if(i===q.c)b.classList.add('correct');
-        else if(i===oi&&!ok)b.classList.add('wrong');
+        if(i===q.c) b.classList.add('correct');
+        else if(i===oi && !ok) b.classList.add('wrong');
     });
     const fb=document.getElementById('pq-feedback'); fb.classList.remove('hidden');
     if(ok){
         fb.innerHTML=`<div class="feedback-content"><div class="feedback-icon">✅</div>
         <div class="feedback-text" style="color:var(--success)">¡Correcto!</div>
-        <div style="color:var(--neon-green);font-family:var(--font-display);font-size:1.8rem;margin-top:8px">+${pts}</div></div>`;
+        <div style="color:var(--neon-green);font-family:var(--font-display);font-size:1.2rem;margin-top:8px">Esperando puntuación...</div></div>`;
+        // Update score when answer-result arrives
     } else {
         fb.innerHTML=`<div class="feedback-content"><div class="feedback-icon">❌</div>
         <div class="feedback-text" style="color:var(--danger)">Incorrecto</div>
@@ -338,13 +451,11 @@ function playerAns(qi,oi,btn){
     }
 }
 
-function showTimeUp(){
-    const room=getRoom(S.roomCode); if(!room)return;
-    const pl=room.players.find(p=>p.id===S.playerId);
-    if(pl){pl.streak=0;S.streak=0}
-    if(!room.answers[S.currentQ])room.answers[S.currentQ]=[];
-    room.answers[S.currentQ].push({pid:S.playerId,oi:-1,time:TIME_PER_Q,ok:false,pts:0});
-    saveRoom(room); bcast('player-answered');
+function showTimeUpFeedback(){
+    // Send empty answer to teacher
+    if(hostConn && hostConn.open){
+        hostConn.send({type:'answer', qi:S.currentQ, oi:-1, time:TIME_PER_Q, pid:S.playerId});
+    }
     const fb=document.getElementById('pq-feedback'); fb.classList.remove('hidden');
     fb.innerHTML=`<div class="feedback-content"><div class="feedback-icon">⏰</div>
     <div class="feedback-text" style="color:var(--neon-yellow)">¡Tiempo agotado!</div></div>`;
@@ -352,8 +463,8 @@ function showTimeUp(){
 
 // ═══════════ RESULTADOS — PROFESOR ═══════════
 function showTeacherResults(){
-    clearInterval(S.timerIv); clearInterval(teacherPoll);
-    const room=getRoom(S.roomCode); if(!room)return;
+    clearInterval(S.timerIv);
+    if(!room) return;
     const q=QUESTIONS[room.qOrder[S.currentQ]];
     const ans=room.answers[S.currentQ]||[];
     document.getElementById('tr-answer-stats').innerHTML=q.o.map((o,i)=>{
@@ -376,43 +487,33 @@ function showTeacherResults(){
 
 // ═══════════ RESULTADO — JUGADOR ═══════════
 function showPlayerResult(){
-    const room=getRoom(S.roomCode); if(!room)return;
-    const ans=room.answers[S.currentQ]||[];
-    const my=ans.find(a=>a.pid===S.playerId);
-    const ok=my&&my.ok;
-    document.getElementById('pr-icon').textContent=ok?'🎉':'💪';
-    document.getElementById('pr-title').textContent=ok?'¡Excelente!':'¡Sigue intentando!';
-    document.getElementById('pr-title').style.color=ok?'var(--success)':'var(--neon-yellow)';
-    document.getElementById('pr-points').textContent=S.score+' pts totales';
-    document.getElementById('pr-streak').textContent=S.streak>=2?`🔥 Racha de ${S.streak}`:'';
+    document.getElementById('pr-icon').textContent = S.score > 0 ? '🎉' : '💪';
+    document.getElementById('pr-title').textContent = S.score > 0 ? '¡Excelente!' : '¡Sigue intentando!';
+    document.getElementById('pr-title').style.color = S.score > 0 ? 'var(--success)' : 'var(--neon-yellow)';
+    document.getElementById('pr-points').textContent = S.score + ' pts totales';
+    document.getElementById('pr-streak').textContent = S.streak >= 2 ? `🔥 Racha de ${S.streak}` : '';
     showScreen('screen-player-result');
-    startPlayerWait();
-}
-function startPlayerWait(){
-    if(playerWaitPoll)clearInterval(playerWaitPoll);
-    playerWaitPoll=setInterval(()=>{
-        const room=getRoom(S.roomCode); if(!room)return;
-        if(room.currentQ>S.currentQ){clearInterval(playerWaitPoll);S.answered=false;showPlayerQ(room.currentQ)}
-        if(room.gameOver){clearInterval(playerWaitPoll);showFinal()}
-    },500);
 }
 
 // ═══════════ SIGUIENTE PREGUNTA ═══════════
 function nextQuestion(){
-    const room=getRoom(S.roomCode); if(!room)return;
-    const nq=S.currentQ+1;
-    if(nq>=room.qOrder.length){
-        room.gameOver=true; saveRoom(room); bcast('game-over'); showFinal(); return;
+    if(!room) return;
+    const nq = S.currentQ + 1;
+    if(nq >= room.qOrder.length){
+        room.gameOver = true;
+        broadcast({type:'game-over', room});
+        showFinal();
+        return;
     }
-    room.currentQ=nq; saveRoom(room);
-    bcast('next-question',{qi:nq}); showTeacherQ(nq);
+    room.currentQ = nq;
+    broadcast({type:'next-question', qi:nq});
+    showTeacherQ(nq);
 }
 
 // ═══════════ PANTALLA FINAL ═══════════
 function showFinal(){
-    clearInterval(S.timerIv); clearInterval(teacherPoll);
-    clearInterval(lobbyPoll); clearInterval(playerWaitPoll);
-    const room=getRoom(S.roomCode); if(!room)return;
+    clearInterval(S.timerIv);
+    if(!room) return;
     const ts=TEAMS.map(t=>{
         const m=room.players.filter(p=>p.team===t.id);
         return {...t,members:m,total:m.reduce((s,p)=>s+p.score,0)};
@@ -453,9 +554,9 @@ function spawnConfetti(){
 }
 
 function backToHome(){
-    if(S.roomCode) rmRoom(S.roomCode);
-    if(channel) channel.close();
-    [S.timerIv,lobbyPoll,teacherPoll,playerWaitPoll].forEach(v=>clearInterval(v));
+    clearInterval(S.timerIv);
+    if(peer){ try{peer.destroy()}catch{} peer=null; }
+    conns=[]; hostConn=null; room=null;
     S={role:null,roomCode:null,playerId:null,playerName:null,playerAvatar:null,
        playerTeam:null,currentQ:0,score:0,streak:0,answered:false,timerIv:null,timeLeft:TIME_PER_Q};
     showScreen('screen-home');
@@ -480,45 +581,28 @@ function backToHome(){
     }
     resize();
     window.addEventListener('resize', resize);
-
-    // Mouse interaction — track position
     document.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
     document.addEventListener('mouseleave', () => { mouseX = -1000; mouseY = -1000; });
 
     function draw(){
         ctx.fillStyle = 'rgba(10, 14, 26, 0.06)';
         ctx.fillRect(0, 0, W, H);
-
         for(let i = 0; i < cols; i++){
             const x = i * fontSize;
             const y = drops[i] * fontSize;
-
-            // Mouse repulsion effect
-            const dx = x - mouseX;
-            const dy = y - mouseY;
+            const dx = x - mouseX, dy = y - mouseY;
             const dist = Math.sqrt(dx*dx + dy*dy);
-
             if(dist < mouseRadius){
-                // Glow brighter near mouse
                 const intensity = 1 - dist / mouseRadius;
-                const g = Math.floor(200 + 55 * intensity);
-                const b = Math.floor(100 * intensity);
-                ctx.fillStyle = `rgba(0, ${g}, ${b}, ${0.9 + intensity * 0.1})`;
-                ctx.font = `bold ${fontSize + Math.floor(intensity * 4)}px monospace`;
+                ctx.fillStyle = `rgba(0, ${Math.floor(200+55*intensity)}, ${Math.floor(100*intensity)}, ${0.9+intensity*0.1})`;
+                ctx.font = `bold ${fontSize + Math.floor(intensity*4)}px monospace`;
             } else {
-                // Normal green with random brightness
-                const brightness = Math.random() * 0.5 + 0.3;
-                ctx.fillStyle = `rgba(0, ${Math.floor(212 * brightness)}, ${Math.floor(255 * brightness * 0.5)}, ${brightness})`;
+                const br = Math.random()*0.5+0.3;
+                ctx.fillStyle = `rgba(0, ${Math.floor(212*br)}, ${Math.floor(255*br*0.5)}, ${br})`;
                 ctx.font = `${fontSize}px monospace`;
             }
-
-            const char = chars[Math.floor(Math.random() * chars.length)];
-            ctx.fillText(char, x, y);
-
-            // Reset drop
-            if(y > H && Math.random() > 0.975){
-                drops[i] = 0;
-            }
+            ctx.fillText(chars[Math.floor(Math.random()*chars.length)], x, y);
+            if(y > H && Math.random() > 0.975) drops[i] = 0;
             drops[i]++;
         }
         requestAnimationFrame(draw);
@@ -532,14 +616,9 @@ window.addEventListener('DOMContentLoaded', ()=>{
     if(hash.startsWith('#room=')){
         const code = hash.replace('#room=','').trim().toUpperCase();
         if(code.length >= 4){
-            // Pre-fill the code and go to join screen
             document.getElementById('input-room-code').value = code;
-            // Small delay to ensure localStorage is synced
-            setTimeout(()=>{
-                showScreen('screen-join');
-            }, 300);
+            setTimeout(()=> showScreen('screen-join'), 300);
         }
-        // Clean the hash
         history.replaceState(null, '', location.href.split('#')[0]);
     }
 });

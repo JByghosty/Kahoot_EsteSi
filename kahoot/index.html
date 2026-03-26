@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Internet Seguro — CyberQuiz</title>
+    <meta name="description" content="Juego educativo tipo Kahoot sobre ciberseguridad e internet seguro">
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- MATRIX CANVAS -->
+    <canvas id="matrix-canvas"></canvas>
+
+    <!-- PANTALLA INICIAL -->
+    <div id="screen-home" class="screen active">
+        <div class="cyber-grid"></div>
+        <div class="home-container">
+            <div class="logo-glow">
+                <h1 class="logo-title">🛡️ Internet Seguro</h1>
+                <p class="logo-subtitle">CyberQuiz — Aprende jugando</p>
+            </div>
+            <div class="home-buttons">
+                <button id="btn-create" class="btn btn-neon btn-create" onclick="createRoom()">
+                    <span class="btn-icon">🎮</span> Crear Sala
+                </button>
+                <button id="btn-join" class="btn btn-neon btn-join" onclick="showScreen('screen-join')">
+                    <span class="btn-icon">🔗</span> Unirse a Sala
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- UNIRSE A SALA -->
+    <div id="screen-join" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="panel-card">
+            <button class="btn-back" onclick="showScreen('screen-home')">← Volver</button>
+            <h2 class="panel-title">Unirse a Sala</h2>
+            <div class="form-group">
+                <label>Código de sala</label>
+                <input id="input-room-code" type="text" maxlength="6" placeholder="ABC123" class="cyber-input" autocomplete="off">
+            </div>
+            <button class="btn btn-neon btn-join" onclick="joinRoomStep1()">Continuar →</button>
+            <p id="join-error" class="error-msg"></p>
+        </div>
+    </div>
+
+    <!-- CONFIGURAR JUGADOR -->
+    <div id="screen-player-setup" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="panel-card wide">
+            <button class="btn-back" onclick="showScreen('screen-join')">← Volver</button>
+            <h2 class="panel-title">Configura tu Jugador</h2>
+            <div class="form-group">
+                <label>Tu nombre</label>
+                <input id="input-player-name" type="text" maxlength="20" placeholder="Ingresa tu nombre" class="cyber-input" autocomplete="off">
+            </div>
+            <div class="form-group">
+                <label>Elige avatar</label>
+                <div id="avatar-grid" class="avatar-grid"></div>
+            </div>
+            <div class="form-group">
+                <label>Elige equipo</label>
+                <div id="team-select" class="team-select"></div>
+            </div>
+            <button class="btn btn-neon btn-create" onclick="joinRoomFinal()">Unirse 🚀</button>
+            <p id="setup-error" class="error-msg"></p>
+        </div>
+    </div>
+
+    <!-- SALA DE ESPERA (PROFESOR) -->
+    <div id="screen-teacher-lobby" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="panel-card wide">
+            <button class="btn-back" onclick="backToHome()">← Menú Principal</button>
+            <div class="room-code-display">
+                <span>Código de Sala:</span>
+                <span id="teacher-room-code" class="room-code-value"></span>
+            </div>
+            <h2 class="panel-title">🧑‍🏫 Panel del Profesor</h2>
+            <div class="lobby-teams" id="lobby-teams"></div>
+            <div class="lobby-controls">
+                <button id="btn-start-game" class="btn btn-neon btn-create btn-lg" onclick="startGame()">▶ Iniciar Juego</button>
+                <p id="start-error" class="error-msg"></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- SALA DE ESPERA (JUGADOR) -->
+    <div id="screen-player-lobby" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="panel-card">
+            <button class="btn-back" onclick="backToHome()">← Menú Principal</button>
+            <div class="room-code-display">
+                <span>Sala:</span>
+                <span id="player-room-code" class="room-code-value"></span>
+            </div>
+            <h2 class="panel-title">Esperando al profesor...</h2>
+            <div class="waiting-anim"><div class="pulse-ring"></div><span class="waiting-icon">⏳</span></div>
+            <p class="waiting-text">El juego comenzará pronto</p>
+            <div id="player-lobby-info" class="lobby-info-mini"></div>
+        </div>
+    </div>
+
+    <!-- CUENTA REGRESIVA -->
+    <div id="screen-countdown" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="countdown-container">
+            <p class="countdown-label">El juego comienza en...</p>
+            <div id="countdown-number" class="countdown-number">3</div>
+        </div>
+    </div>
+
+    <!-- PREGUNTA (PROFESOR) -->
+    <div id="screen-teacher-question" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="teacher-dashboard">
+            <div class="dash-header">
+                <span id="tq-progress" class="q-progress"></span>
+                <span id="tq-timer" class="q-timer">⏱ 20s</span>
+            </div>
+            <div class="dash-question-card">
+                <h2 id="tq-question" class="question-text"></h2>
+                <div id="tq-options" class="options-display"></div>
+            </div>
+            <div class="dash-stats-row">
+                <div class="stat-card"><h4>Respuestas</h4><span id="tq-answered" class="stat-num">0</span><span id="tq-total-players" class="stat-detail"></span></div>
+                <div class="stat-card"><h4>⚡ Equipo Cyber</h4><span id="tq-team1-score" class="stat-num team1-color">0</span></div>
+                <div class="stat-card"><h4>🛡️ Equipo Shield</h4><span id="tq-team2-score" class="stat-num team2-color">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PREGUNTA (JUGADOR) -->
+    <div id="screen-player-question" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="player-question-container">
+            <div class="pq-header">
+                <span id="pq-progress" class="q-progress"></span>
+                <div id="pq-timer-bar" class="timer-bar"><div id="pq-timer-fill" class="timer-fill"></div></div>
+                <span id="pq-timer" class="q-timer">20s</span>
+            </div>
+            <h2 id="pq-question" class="question-text"></h2>
+            <div id="pq-options" class="options-grid"></div>
+            <div id="pq-feedback" class="feedback-overlay hidden"></div>
+        </div>
+    </div>
+
+    <!-- RESULTADOS PREGUNTA (PROFESOR) -->
+    <div id="screen-teacher-results" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="teacher-dashboard">
+            <h2 class="panel-title">📊 Resultados de la Pregunta</h2>
+            <div id="tr-answer-stats" class="answer-stats"></div>
+            <div class="dash-stats-row">
+                <div class="stat-card wide"><h4>🏆 Ranking Individual</h4><div id="tr-player-ranking" class="ranking-list"></div></div>
+            </div>
+            <button class="btn btn-neon btn-create btn-lg" onclick="nextQuestion()">Siguiente Pregunta →</button>
+        </div>
+    </div>
+
+    <!-- RESULTADO PREGUNTA (JUGADOR) -->
+    <div id="screen-player-result" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="panel-card">
+            <div id="pr-icon" class="result-icon"></div>
+            <h2 id="pr-title" class="result-title"></h2>
+            <p id="pr-points" class="result-points"></p>
+            <p id="pr-streak" class="result-streak"></p>
+            <p class="waiting-text">Esperando la siguiente pregunta...</p>
+        </div>
+    </div>
+
+    <!-- PANTALLA FINAL -->
+    <div id="screen-final" class="screen">
+        <div class="cyber-grid"></div>
+        <div class="final-container">
+            <h1 class="final-title">🏆 ¡Juego Terminado!</h1>
+            <div id="final-winner-team" class="winner-team-card"></div>
+            <div id="final-mvp" class="mvp-card"></div>
+            <div class="final-rankings">
+                <div id="final-team-ranking" class="ranking-section"></div>
+                <div id="final-player-ranking" class="ranking-section"></div>
+            </div>
+            <button class="btn btn-neon btn-create btn-lg" onclick="backToHome()">🏠 Volver al Inicio</button>
+        </div>
+    </div>
+
+    <script src="game.js"></script>
+</body>
+</html>

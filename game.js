@@ -116,6 +116,12 @@ function createRoom(){
     startLobbyPoll();
 }
 
+// Abre una nueva pestaña del mismo archivo para un jugador (garantiza mismo origin)
+function openPlayerTab(){
+    const url = location.href.split('#')[0] + '#room=' + S.roomCode;
+    window.open(url, '_blank');
+}
+
 // ═══════════ UNIRSE A SALA ═══════════
 function joinRoomStep1(){
     const code = document.getElementById('input-room-code').value.trim().toUpperCase();
@@ -519,3 +525,21 @@ function backToHome(){
     }
     draw();
 })();
+
+// ═══════════ AUTO-JOIN DESDE URL HASH ═══════════
+window.addEventListener('DOMContentLoaded', ()=>{
+    const hash = location.hash;
+    if(hash.startsWith('#room=')){
+        const code = hash.replace('#room=','').trim().toUpperCase();
+        if(code.length >= 4){
+            // Pre-fill the code and go to join screen
+            document.getElementById('input-room-code').value = code;
+            // Small delay to ensure localStorage is synced
+            setTimeout(()=>{
+                showScreen('screen-join');
+            }, 300);
+        }
+        // Clean the hash
+        history.replaceState(null, '', location.href.split('#')[0]);
+    }
+});

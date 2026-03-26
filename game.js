@@ -21,7 +21,11 @@ const PEER_CONFIG = {
         iceServers: [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
-            { urls: 'stun:stun2.l.google.com:19302' }
+            // TURN servers para atravesar redes estrictas (como datos móviles 4G/5G)
+            { urls: 'stun:openrelay.metered.ca:80' },
+            { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+            { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+            { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
         ]
     }
 };
@@ -204,14 +208,14 @@ function joinRoomStep1(){
             console.error('Connection error:', e);
         });
 
-        // Timeout if no connection
+        // Timeout if no connection (aumentado para dar tiempo al servidor TURN)
         setTimeout(()=>{
             if(!hostConn || !hostConn.open){
                 err.textContent='Sala no encontrada o profesor desconectado';
                 // Clean up so they can try again
                 if(peer) peer.destroy();
             }
-        }, 12000);
+        }, 15000);
     });
 
     peer.on('error', err2 => {
